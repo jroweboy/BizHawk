@@ -84,6 +84,11 @@ namespace BizHawk.Emulation.Cores.Nintendo.N64
 		/// <param name="i">Id of controller to update and shove</param>
 		public int GetControllerInput(int i)
 		{
+			if (Controller == null)
+			{
+				ThisFrameInputPolled = false;
+				return 0;
+			}
 			_emuCore.InputCallbacks.Call();
 			ThisFrameInputPolled = true;
 

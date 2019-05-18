@@ -126,9 +126,10 @@ namespace BizHawk.Emulation.Cores.Nintendo.N64
 			api.AttachPlugin(mupen64plusApi.m64p_plugin_type.M64PLUGIN_RSP, rsp);
 
 			InitMemoryDomains();
+			// TODO(jroweboy): Selectively enable dynarec when tracing is disabled
 			//if (_syncSettings.Core != N64SyncSettings.CoreType.Dynarec)
 			{
-				ConnectTracer();
+				//ConnectTracer();
 				SetBreakpointHandler();
 			}
 
@@ -229,11 +230,11 @@ namespace BizHawk.Emulation.Cores.Nintendo.N64
 
 			if (Tracer != null && Tracer.Enabled)
 			{
-				api.setTraceCallback(_tracecb);
+				//api.setTraceCallback(_tracecb);
 			}
 			else
 			{
-				api.setTraceCallback(null);
+				//api.setTraceCallback(null);
 			}
 
 			_audioProvider.RenderSound = rendersound;

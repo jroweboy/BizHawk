@@ -27,9 +27,9 @@
 #define VERSION_H
 
 #define PLUGIN_NAME    "Mupen64Plus Bizhawk Input Plugin"
-#define PLUGIN_VERSION           0x016305
-#define INPUT_PLUGIN_API_VERSION 0x020000
-#define CONFIG_API_VERSION       0x020000
+#define PLUGIN_VERSION           0x016306
+#define INPUT_PLUGIN_API_VERSION 0x020100
+#define CONFIG_API_VERSION       0x020301
 
 #define VERSION_PRINTF_SPLIT(x) (((x) >> 16) & 0xffff), (((x) >> 8) & 0xff), ((x) & 0xff)
 

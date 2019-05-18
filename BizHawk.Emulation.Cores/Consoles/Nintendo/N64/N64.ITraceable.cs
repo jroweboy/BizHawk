@@ -12,7 +12,7 @@ namespace BizHawk.Emulation.Cores.Nintendo.N64
 	{
 		public TraceBuffer Tracer { get; private set; }
 
-		private mupen64plusApi.TraceCallback _tracecb;
+		//private mupen64plusApi.TraceCallback _tracecb;
 
 		public void MakeTrace()
 		{
@@ -60,7 +60,7 @@ namespace BizHawk.Emulation.Cores.Nintendo.N64
 		{
 			Tracer = new TraceBuffer { Header = TraceHeader };
 			(ServiceProvider as BasicServiceProvider).Register<ITraceable>(Tracer);
-			_tracecb = new mupen64plusApi.TraceCallback(MakeTrace);
+			//_tracecb = new mupen64plusApi.TraceCallback(MakeTrace);
 		}
 	}
 }

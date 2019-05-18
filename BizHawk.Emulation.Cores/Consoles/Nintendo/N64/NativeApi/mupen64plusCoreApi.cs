@@ -6,6 +6,7 @@ using System.Threading;
 using BizHawk.Common;
 using BizHawk.Emulation.Common;
 using System.Text;
+using System.IO;
 
 namespace BizHawk.Emulation.Cores.Nintendo.N64.NativeApi
 {
@@ -28,6 +29,17 @@ namespace BizHawk.Emulation.Cores.Nintendo.N64.NativeApi
 		bool event_breakpoint = false;
 
 		private static readonly PlatformLinkedLibSingleton.PlatformLinkedLibManager libLoader = PlatformLinkedLibSingleton.LinkedLibManager;
+
+		// Holds a pointer in memory to the cpu registers
+		private IntPtr[] cpu_data_pointers = new IntPtr[9];
+
+		public enum m64p_type
+		{
+			M64TYPE_INT = 1,
+			M64TYPE_FLOAT,
+			M64TYPE_BOOL,
+			M64TYPE_STRING
+		};
 
 		public enum m64p_error
 		{
@@ -58,6 +70,26 @@ namespace BizHawk.Emulation.Cores.Nintendo.N64.NativeApi
 			M64PLUGIN_CORE
 		};
 
+		private enum m64p_emu_state {
+			M64EMU_STOPPED = 1,
+			M64EMU_RUNNING,
+			M64EMU_PAUSED
+		}
+
+		private enum m64p_core_param {
+			M64CORE_EMU_STATE = 1,
+			M64CORE_VIDEO_MODE,
+			M64CORE_SAVESTATE_SLOT,
+			M64CORE_SPEED_FACTOR,
+			M64CORE_SPEED_LIMITER,
+			M64CORE_VIDEO_SIZE,
+			M64CORE_AUDIO_VOLUME,
+			M64CORE_AUDIO_MUTE,
+			M64CORE_INPUT_GAMESHARK,
+			M64CORE_STATE_LOADCOMPLETE,
+			M64CORE_STATE_SAVECOMPLETE
+		}
+
 		private enum m64p_command
 		{
 			M64CMD_NOP = 0,
@@ -81,8 +113,7 @@ namespace BizHawk.Emulation.Cores.Nintendo.N64.NativeApi
 			M64CMD_READ_SCREEN,
 			M64CMD_RESET,
 			M64CMD_ADVANCE_FRAME,
-			M64CMD_SET_VI_CALLBACK,
-			M64CMD_SET_RENDER_CALLBACK
+			M64CMD_SET_MEDIA_LOADER
 		};
 
 		private enum m64p_dbg_bkp_command
@@ -101,13 +132,11 @@ namespace BizHawk.Emulation.Cores.Nintendo.N64.NativeApi
 		[Flags]
 		private enum m64p_dbg_bkp_flags
 		{
-			M64P_BPT_FLAG_ENABLED = 0x01,
-			M64P_BPT_FLAG_CONDITIONAL = 0x02,
-			M64P_BPT_FLAG_COUNTER = 0x04,
-			M64P_BPT_FLAG_READ = 0x08,
-			M64P_BPT_FLAG_WRITE = 0x10,
-			M64P_BPT_FLAG_EXEC = 0x20,
-			M64P_BPT_FLAG_LOG = 0x40
+			M64P_BKP_FLAG_ENABLED = 0x01,
+			M64P_BKP_FLAG_READ = 0x02,
+			M64P_BKP_FLAG_WRITE = 0x04,
+			M64P_BKP_FLAG_EXEC = 0x08,
+			M64P_BKP_FLAG_LOG = 0x10 /* Log to the console when this breakpoint hits */
 		};
 
 		private enum m64p_dbg_state
@@ -126,37 +155,78 @@ namespace BizHawk.Emulation.Cores.Nintendo.N64.NativeApi
 			M64P_DBG_RUNSTATE_RUNNING
 		};
 
-		public enum m64p_emu_state
+		private enum m64p_dbg_memptr_type
 		{
-			M64EMU_STOPPED = 1,
-			M64EMU_RUNNING,
-			M64EMU_PAUSED
-		};
+			M64P_DBG_PTR_RDRAM = 1,
+			M64P_DBG_PTR_PI_REG,
+			M64P_DBG_PTR_SI_REG,
+			M64P_DBG_PTR_VI_REG,
+			M64P_DBG_PTR_RI_REG,
+			M64P_DBG_PTR_AI_REG
+		}
 
-		public enum m64p_type
-		{
-			M64TYPE_INT = 1,
-			M64TYPE_FLOAT,
-			M64TYPE_BOOL,
-			M64TYPE_STRING
-		};
+		private enum m64p_dbg_mem_info : uint {
+			M64P_DBG_MEM_TYPE = 1,
+			M64P_DBG_MEM_FLAGS,
+			M64P_DBG_MEM_HAS_RECOMPILED,
+			M64P_DBG_MEM_NUM_RECOMPILED,
+			// TODO: Upstream retreiving memory region size
+			M64P_DBG_MEM_REGION_SIZE,
+			M64P_DBG_RECOMP_OPCODE = 16,
+			M64P_DBG_RECOMP_ARGS,
+			M64P_DBG_RECOMP_ADDR
+		}
+
+		private enum m64p_dbg_mem_type {
+			M64P_MEM_NOMEM = 0,
+			M64P_MEM_NOTHING,
+			M64P_MEM_RDRAM,
+			M64P_MEM_RDRAMREG,
+			M64P_MEM_RSPMEM,
+			M64P_MEM_RSPREG,
+			M64P_MEM_RSP,
+			M64P_MEM_DP,
+			M64P_MEM_DPS,
+			M64P_MEM_VI,
+			M64P_MEM_AI,
+			M64P_MEM_PI,
+			M64P_MEM_RI,
+			M64P_MEM_SI,
+			M64P_MEM_FLASHRAMSTAT,
+			M64P_MEM_ROM,
+			M64P_MEM_PIF,
+			M64P_MEM_MI,
+			M64P_MEM_BREAKPOINT
+		}
 
 		public enum N64_MEMORY : uint
 		{
-			RDRAM = 1,
-			PI_REG,
-			SI_REG,
-			VI_REG,
-			RI_REG,
-			AI_REG,
+			RDRAM = m64p_dbg_memptr_type.M64P_DBG_PTR_RDRAM,
+			PI_REG = m64p_dbg_memptr_type.M64P_DBG_PTR_PI_REG,
+			SI_REG = m64p_dbg_memptr_type.M64P_DBG_PTR_SI_REG,
+			VI_REG = m64p_dbg_memptr_type.M64P_DBG_PTR_VI_REG,
+			RI_REG = m64p_dbg_memptr_type.M64P_DBG_PTR_RI_REG,
+			AI_REG = m64p_dbg_memptr_type.M64P_DBG_PTR_AI_REG,
 
-			EEPROM = 100,
-			MEMPAK1,
-			MEMPAK2,
-			MEMPAK3,
-			MEMPAK4,
+			//EEPROM = 100,
+			//MEMPAK1,
+			//MEMPAK2,
+			//MEMPAK3,
+			//MEMPAK4,
 
-			THE_ROM
+			//THE_ROM
+		}
+
+		private enum m64p_dbg_cpu_data {
+			M64P_CPU_PC = 1,
+			M64P_CPU_REG_REG,
+			M64P_CPU_REG_HI,
+			M64P_CPU_REG_LO,
+			M64P_CPU_REG_COP0,
+			M64P_CPU_REG_COP1_DOUBLE_PTR,
+			M64P_CPU_REG_COP1_SIMPLE_PTR,
+			M64P_CPU_REG_COP1_FGR_64,
+			M64P_CPU_TLB
 		}
 
 		[StructLayout(LayoutKind.Sequential)]
@@ -175,13 +245,13 @@ namespace BizHawk.Emulation.Cores.Nintendo.N64.NativeApi
 		/// <param name="APIVersion">Specifies what API version our app is using. Just set this to 0x20001</param>
 		/// <param name="ConfigPath">Directory to have the DLL look for config data. "" seems to disable this</param>
 		/// <param name="DataPath">Directory to have the DLL look for user data. "" seems to disable this</param>
-		/// <param name="Context">Use "Core"</param>
+		/// <param name="Context">User data that will be passed in when the core calls DebugCallback</param>
 		/// <param name="DebugCallback">A function to use when the core wants to output debug messages</param>
-		/// <param name="context2">Use ""</param>
-		/// <param name="dummy">Use IntPtr.Zero</param>
+		/// <param name="context2">User data that will be passed in when the core calls StateCallback</param>
+		/// <param name="StateCallback">Notifies the frontend whenever the core finishes a state transition</param>
 		/// <returns></returns>
 		[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-		delegate m64p_error CoreStartup(int APIVersion, string ConfigPath, string DataPath, string Context, DebugCallback DebugCallback, string context2, IntPtr dummy);
+		delegate m64p_error CoreStartup(int APIVersion, string ConfigPath, string DataPath, IntPtr Context, DebugCallback DebugCallback, IntPtr context2, StateCallback stateCallback);
 		CoreStartup m64pCoreStartup;
 
 		/// <summary>
@@ -210,6 +280,16 @@ namespace BizHawk.Emulation.Cores.Nintendo.N64.NativeApi
 		[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 		delegate m64p_error CoreDetachPlugin(m64p_plugin_type PluginType);
 		CoreDetachPlugin m64pCoreDetachPlugin;
+
+
+		/// <summary>
+		/// Disconnects a plugin DLL from the core DLL
+		/// </summary>
+		/// <param name="PluginType">The type of plugin to be disconnected</param>
+		/// <returns></returns>
+		[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+		public delegate m64p_error CoreOverrideVidExt(IntPtr video_extensions);
+		public CoreOverrideVidExt m64pCoreOverrideVidExt;
 
 		/// <summary>
 		/// Opens a section in the global config system
@@ -246,24 +326,6 @@ namespace BizHawk.Emulation.Cores.Nintendo.N64.NativeApi
 		ConfigSetParameterStr m64pConfigSetParameterStr;
 
 		/// <summary>
-		/// Saves the mupen64plus state to the provided buffer
-		/// </summary>
-		/// <param name="buffer">A byte array to use to save the state. Must be at least 16788288 + 1024 bytes</param>
-		/// <returns></returns>
-		[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-		delegate int savestates_save_bkm(byte[] buffer);
-		savestates_save_bkm m64pCoreSaveState;
-
-		/// <summary>
-		/// Loads the mupen64plus state from the provided buffer
-		/// </summary>
-		/// <param name="buffer">A byte array filled with the state to load. Must be at least 16788288 + 1024 bytes</param>
-		/// <returns></returns>
-		[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-		delegate int savestates_load_bkm(byte[] buffer);
-		savestates_load_bkm m64pCoreLoadState;
-
-		/// <summary>
 		/// Gets a pointer to a section of the mupen64plus core
 		/// </summary>
 		/// <param name="mem_ptr_type">The section to get a pointer for</param>
@@ -278,8 +340,8 @@ namespace BizHawk.Emulation.Cores.Nintendo.N64.NativeApi
 		/// <param name="mem_ptr_type">The section to get the size of</param>
 		/// <returns>The size of the section requested</returns>
 		[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-		delegate int MemGetSize(N64_MEMORY mem_ptr_type);
-		MemGetSize m64pMemGetSize;
+		delegate int DebugMemGetMemInfo(m64p_dbg_mem_info mem_ptr_type, uint address);
+		DebugMemGetMemInfo m64pMemGetMemInfo;
 
 		/// <summary>
 		/// Initializes the saveram (eeprom and 4 mempacks)
@@ -323,6 +385,12 @@ namespace BizHawk.Emulation.Cores.Nintendo.N64.NativeApi
 		[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 		delegate m64p_error CoreDoCommandRenderCallback(m64p_command Command, int ParamInt, RenderCallback ParamPtr);
 		CoreDoCommandRenderCallback m64pCoreDoCommandRenderCallback;
+		[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+		delegate m64p_error CoreDoCommandSaveState(m64p_command Command, int ParamInt, [MarshalAs(UnmanagedType.LPStr)] string ParamPtr);
+		CoreDoCommandSaveState m64pCoreSaveState;
+		[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+		delegate m64p_error CoreDoCommandLoadState(m64p_command Command, int ParamInt, [MarshalAs(UnmanagedType.LPStr)] string ParamPtr);
+		CoreDoCommandLoadState m64pCoreLoadState;
 
 		//WARNING - RETURNS A STATIC BUFFER
 		[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
@@ -374,6 +442,17 @@ namespace BizHawk.Emulation.Cores.Nintendo.N64.NativeApi
 		/// <param name="Message">The message to display</param>
 		[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 		public delegate void DebugCallback(IntPtr Context, int level, string Message);
+		DebugCallback m64pDebugCallback;
+
+		/// <summary>
+		/// Handles a debug message from mupen64plus
+		/// </summary>
+		/// <param name="Context"></param>
+		/// <param name="level"></param>
+		/// <param name="Message">The message to display</param>
+		[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+		delegate void StateCallback(IntPtr Context, m64p_core_param param_type, int new_value);
+		StateCallback m64pStateCallback;
 
 		/// <summary>
 		/// This will be called every time a new frame is finished
@@ -405,15 +484,15 @@ namespace BizHawk.Emulation.Cores.Nintendo.N64.NativeApi
 		/// <summary>
 		/// Type of the trace callback
 		/// </summary>
-		[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-		public delegate void TraceCallback();
+		//[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+		//public delegate void TraceCallback();
 
 		/// <summary>
 		/// Sets the trace callback
 		/// </summary>
-		[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-		public delegate void SetTraceCallback(TraceCallback callback);
-		SetTraceCallback m64pSetTraceCallback;
+		//[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+		//public delegate void SetTraceCallback(TraceCallback callback);
+		//SetTraceCallback m64pSetTraceCallback;
 
 		/// <summary>
 		/// Gets the CPU registers
@@ -464,6 +543,13 @@ namespace BizHawk.Emulation.Cores.Nintendo.N64.NativeApi
 		DebugBreakpointCommand m64pDebugBreakpointCommand;
 
 		/// <summary>
+		/// This function is used to retrieve the trigger flags and address for the most recently triggered breakpoint.
+		/// </summary>
+		[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+		delegate void DebugBreakpointTriggeredBy(ref uint flags, ref uint address);
+		DebugBreakpointTriggeredBy m64pDebugBreakpointTriggeredBy;
+
+		/// <summary>
 		/// Gets a debugger state variable
 		/// </summary>
 		[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
@@ -484,6 +570,13 @@ namespace BizHawk.Emulation.Cores.Nintendo.N64.NativeApi
 		delegate m64p_error DebugStep();
 		DebugStep m64pDebugStep;
 
+		/// <summary>
+		/// This function returns a memory pointer (in x86 memory space) to a specific register in the emulated R4300 CPU.
+		/// </summary>
+		[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+		delegate IntPtr DebugGetCPUDataPtr(m64p_dbg_cpu_data data);
+		DebugGetCPUDataPtr m64pDebugGetCPUDataPtr;
+
 		// DLL handles
 		public IntPtr CoreDll { get; private set; }
 
@@ -503,9 +596,9 @@ namespace BizHawk.Emulation.Cores.Nintendo.N64.NativeApi
 
 			connectFunctionPointers();
 
+			m64pStateCallback = new StateCallback(FireStateChangedEvent);
 			// Start up the core
-			m64p_error result = m64pCoreStartup(0x20001, "", "", "Core",
-				null, "", IntPtr.Zero);
+			m64p_error result = m64pCoreStartup(0x020102, "", "", IntPtr.Zero, null, IntPtr.Zero, m64pStateCallback);
 
 			// Open the core settings section in the config system
 			IntPtr core_section = IntPtr.Zero;
@@ -547,10 +640,12 @@ namespace BizHawk.Emulation.Cores.Nintendo.N64.NativeApi
 			// Initialize event invoker
 			m64pFrameCallback = new FrameCallback(FireFrameFinishedEvent);
 			result = m64pCoreDoCommandFrameCallback(m64p_command.M64CMD_SET_FRAME_CALLBACK, 0, m64pFrameCallback);
-			m64pVICallback = new VICallback(FireVIEvent);
-			result = m64pCoreDoCommandVICallback(m64p_command.M64CMD_SET_VI_CALLBACK, 0, m64pVICallback);
-			m64pRenderCallback = new RenderCallback(FireRenderEvent);
-			result = m64pCoreDoCommandRenderCallback(m64p_command.M64CMD_SET_RENDER_CALLBACK, 0, m64pRenderCallback);
+			// TODO(jroweboy): Upstream https://github.com/TASVideos/BizHawk/commit/3bc682a411cfe1454a703499fe811dd497fcc738
+			//m64pVICallback = new VICallback(FireVIEvent);
+			//result = m64pCoreDoCommandVICallback(m64p_command.M64CMD_SET_VI_CALLBACK, 0, m64pVICallback);
+			// TODO(jroweboy): Upstream https://github.com/TASVideos/BizHawk/commit/710e461165d3aa3806f77ec35b795e8a0f9f14c5
+			//m64pRenderCallback = new RenderCallback(FireRenderEvent);
+			//result = m64pCoreDoCommandRenderCallback(m64p_command.M64CMD_SET_RENDER_CALLBACK, 0, m64pRenderCallback);
 			m64pDebugInitCallback = new DebugInitCallback(OnDebuggerInitialized);
 			m64pDebugUpdateCallback = new DebugUpdateCallback(FireBreakpointEvent);
 			result = m64pDebugSetCallbacks(m64pDebugInitCallback, m64pDebugUpdateCallback, null);
@@ -584,11 +679,10 @@ namespace BizHawk.Emulation.Cores.Nintendo.N64.NativeApi
 		private void ExecuteEmulatorThread()
 		{
 			emulator_running = true;
-			var cb = new StartupCallback(() => m64pStartupComplete.Set());
-			m64pCoreDoCommandPtr(m64p_command.M64CMD_EXECUTE, 0,
-				Marshal.GetFunctionPointerForDelegate(cb));
+			//var cb = new StartupCallback(() => m64pStartupComplete.Set());
+			m64pCoreDoCommandPtr(m64p_command.M64CMD_EXECUTE, 0, IntPtr.Zero);// Marshal.GetFunctionPointerForDelegate(cb));
 			emulator_running = false;
-			cb.GetType();
+			//cb.GetType();
 		}
 
 		/// <summary>
@@ -609,8 +703,8 @@ namespace BizHawk.Emulation.Cores.Nintendo.N64.NativeApi
 			m64pConfigOpenSection = (ConfigOpenSection)Marshal.GetDelegateForFunctionPointer(libLoader.GetProcAddr(CoreDll, "ConfigOpenSection"), typeof(ConfigOpenSection));
 			m64pConfigSetParameter = (ConfigSetParameter)Marshal.GetDelegateForFunctionPointer(libLoader.GetProcAddr(CoreDll, "ConfigSetParameter"), typeof(ConfigSetParameter));
 			m64pConfigSetParameterStr = (ConfigSetParameterStr)Marshal.GetDelegateForFunctionPointer(libLoader.GetProcAddr(CoreDll, "ConfigSetParameter"), typeof(ConfigSetParameterStr));
-			m64pCoreSaveState = (savestates_save_bkm)Marshal.GetDelegateForFunctionPointer(libLoader.GetProcAddr(CoreDll, "savestates_save_bkm"), typeof(savestates_save_bkm));
-			m64pCoreLoadState = (savestates_load_bkm)Marshal.GetDelegateForFunctionPointer(libLoader.GetProcAddr(CoreDll, "savestates_load_bkm"), typeof(savestates_load_bkm));
+			m64pCoreSaveState = (CoreDoCommandSaveState)Marshal.GetDelegateForFunctionPointer(libLoader.GetProcAddr(CoreDll, "CoreDoCommand"), typeof(CoreDoCommandSaveState));
+			m64pCoreLoadState = (CoreDoCommandLoadState)Marshal.GetDelegateForFunctionPointer(libLoader.GetProcAddr(CoreDll, "CoreDoCommand"), typeof(CoreDoCommandLoadState));
 			m64pDebugMemGetPointer = (DebugMemGetPointer)Marshal.GetDelegateForFunctionPointer(libLoader.GetProcAddr(CoreDll, "DebugMemGetPointer"), typeof(DebugMemGetPointer));
 			m64pDebugSetCallbacks = (DebugSetCallbacks)Marshal.GetDelegateForFunctionPointer(libLoader.GetProcAddr(CoreDll, "DebugSetCallbacks"), typeof(DebugSetCallbacks));
 			m64pDebugBreakpointLookup = (DebugBreakpointLookup)Marshal.GetDelegateForFunctionPointer(libLoader.GetProcAddr(CoreDll, "DebugBreakpointLookup"), typeof(DebugBreakpointLookup));
@@ -618,19 +712,25 @@ namespace BizHawk.Emulation.Cores.Nintendo.N64.NativeApi
 			m64pDebugGetState = (DebugGetState)Marshal.GetDelegateForFunctionPointer(libLoader.GetProcAddr(CoreDll, "DebugGetState"), typeof(DebugGetState));
 			m64pDebugSetRunState = (DebugSetRunState)Marshal.GetDelegateForFunctionPointer(libLoader.GetProcAddr(CoreDll, "DebugSetRunState"), typeof(DebugSetRunState));
 			m64pDebugStep = (DebugStep)Marshal.GetDelegateForFunctionPointer(libLoader.GetProcAddr(CoreDll, "DebugStep"), typeof(DebugStep));
-			m64pMemGetSize = (MemGetSize)Marshal.GetDelegateForFunctionPointer(libLoader.GetProcAddr(CoreDll, "MemGetSize"), typeof(MemGetSize));
-			m64pinit_saveram = (init_saveram)Marshal.GetDelegateForFunctionPointer(libLoader.GetProcAddr(CoreDll, "init_saveram"), typeof(init_saveram));
-			m64psave_saveram = (save_saveram)Marshal.GetDelegateForFunctionPointer(libLoader.GetProcAddr(CoreDll, "save_saveram"), typeof(save_saveram));
-			m64pload_saveram = (load_saveram)Marshal.GetDelegateForFunctionPointer(libLoader.GetProcAddr(CoreDll, "load_saveram"), typeof(load_saveram));
+			m64pMemGetMemInfo = (DebugMemGetMemInfo)Marshal.GetDelegateForFunctionPointer(libLoader.GetProcAddr(CoreDll, "DebugMemGetMemInfo"), typeof(DebugMemGetMemInfo));
+			m64pCoreOverrideVidExt = (CoreOverrideVidExt)Marshal.GetDelegateForFunctionPointer(libLoader.GetProcAddr(CoreDll, "CoreOverrideVidExt"), typeof(CoreOverrideVidExt));
 
-			m64pSetTraceCallback = (SetTraceCallback)Marshal.GetDelegateForFunctionPointer(libLoader.GetProcAddr(CoreDll, "SetTraceCallback"), typeof(SetTraceCallback));
 
-			m64pGetRegisters = (GetRegisters)Marshal.GetDelegateForFunctionPointer(libLoader.GetProcAddr(CoreDll, "GetRegisters"), typeof(GetRegisters));
+			//m64pSetVideoMode = (VidExtSetVideoMode)Marshal.GetDelegateForFunctionPointer(libLoader.GetProcAddr(CoreDll, "VidExt_SetVideoMode"), typeof(VidExtSetVideoMode));
+			// TODO: upstream https://github.com/TASVideos/BizHawk/commit/ed4c715a9f7861a8cfc15c3015402637929f7aaa
+			//m64pinit_saveram = (init_saveram)Marshal.GetDelegateForFunctionPointer(libLoader.GetProcAddr(CoreDll, "init_saveram"), typeof(init_saveram));
+			//m64psave_saveram = (save_saveram)Marshal.GetDelegateForFunctionPointer(libLoader.GetProcAddr(CoreDll, "save_saveram"), typeof(save_saveram));
+			//m64pload_saveram = (load_saveram)Marshal.GetDelegateForFunctionPointer(libLoader.GetProcAddr(CoreDll, "load_saveram"), typeof(load_saveram));
 
-			m64p_read_memory_8 = (biz_read_memory)Marshal.GetDelegateForFunctionPointer(libLoader.GetProcAddr(CoreDll, "biz_read_memory"), typeof(biz_read_memory));
-			m64p_write_memory_8 = (biz_write_memory)Marshal.GetDelegateForFunctionPointer(libLoader.GetProcAddr(CoreDll, "biz_write_memory"), typeof(biz_write_memory));
+			//m64pSetTraceCallback = (SetTraceCallback)Marshal.GetDelegateForFunctionPointer(libLoader.GetProcAddr(CoreDll, "SetTraceCallback"), typeof(SetTraceCallback));
 
-			m64p_decode_op = (biz_r4300_decode_op)Marshal.GetDelegateForFunctionPointer(libLoader.GetProcAddr(CoreDll, "biz_r4300_decode_op"), typeof(biz_r4300_decode_op));
+			//m64pGetRegisters = (GetRegisters)Marshal.GetDelegateForFunctionPointer(libLoader.GetProcAddr(CoreDll, "GetRegisters"), typeof(GetRegisters));
+			m64pDebugGetCPUDataPtr = (DebugGetCPUDataPtr)Marshal.GetDelegateForFunctionPointer(libLoader.GetProcAddr(CoreDll, "DebugGetCPUDataPtr"), typeof(DebugGetCPUDataPtr));
+
+			//m64p_read_memory_8 = (biz_read_memory)Marshal.GetDelegateForFunctionPointer(libLoader.GetProcAddr(CoreDll, "biz_read_memory"), typeof(biz_read_memory));
+			//m64p_write_memory_8 = (biz_write_memory)Marshal.GetDelegateForFunctionPointer(libLoader.GetProcAddr(CoreDll, "biz_write_memory"), typeof(biz_write_memory));
+
+			//m64p_decode_op = (biz_r4300_decode_op)Marshal.GetDelegateForFunctionPointer(libLoader.GetProcAddr(CoreDll, "biz_r4300_decode_op"), typeof(biz_r4300_decode_op));
 		}
 
 		/// <summary>
@@ -692,7 +792,7 @@ namespace BizHawk.Emulation.Cores.Nintendo.N64.NativeApi
 
 		public int get_memory_size(N64_MEMORY id)
 		{
-			return m64pMemGetSize(id);
+			return m64pMemGetMemInfo(m64p_dbg_mem_info.M64P_DBG_MEM_REGION_SIZE, (uint)id);
 		}
 
 		public IntPtr get_memory_ptr(N64_MEMORY id)
@@ -786,19 +886,24 @@ namespace BizHawk.Emulation.Cores.Nintendo.N64.NativeApi
 
 		public int SaveState(byte[] buffer)
 		{
-			return m64pCoreSaveState(buffer);
+			string tempfile = Path.GetTempFileName();
+			m64pCoreSaveState(m64p_command.M64CMD_STATE_SAVE, /*ignored*/ 0, tempfile);
+			buffer = File.ReadAllBytes(tempfile);
+			return buffer.Length;
 		}
 
 		public void LoadState(byte[] buffer)
 		{
-			m64pCoreLoadState(buffer);
+			string tempfile = Path.GetTempFileName();
+			File.WriteAllBytes(tempfile, buffer);
+			m64pCoreSaveState(m64p_command.M64CMD_STATE_LOAD, /*ignored*/ 0, tempfile);
 		}
 
 		byte[] saveram_backup;
 
 		public void InitSaveram()
 		{
-			m64pinit_saveram();
+			//m64pinit_saveram();
 		}
 
 		public const int kSaveramSize = 0x800 + 4 * 0x8000 + 0x20000 + 0x8000;
@@ -820,14 +925,16 @@ namespace BizHawk.Emulation.Cores.Nintendo.N64.NativeApi
 			else
 			{
 				byte[] dest = new byte[kSaveramSize];
-				m64psave_saveram(dest);
+				// TODO(jroweboy): upstream support for saveram
+				//m64psave_saveram(dest);
 				return dest;
 			}
 		}
 
 		public void LoadSaveram(byte[] src)
 		{
-			m64pload_saveram(src);
+			// TODO(jroweboy): upstream support for saveram
+			//m64pload_saveram(src);
 		}
 
 		/* TODO: Support address masks and null address */
@@ -837,21 +944,21 @@ namespace BizHawk.Emulation.Cores.Nintendo.N64.NativeApi
 			{
 				address = address.Value,
 				endaddr = address.Value + 0x03,
-				flags = (uint)m64p_dbg_bkp_flags.M64P_BPT_FLAG_ENABLED
+				flags = (uint)m64p_dbg_bkp_flags.M64P_BKP_FLAG_ENABLED
 			};
 
 			switch(type)
 			{
 				case BreakType.Read:
-					breakpoint.flags |= (uint)m64p_dbg_bkp_flags.M64P_BPT_FLAG_READ;
+					breakpoint.flags |= (uint)m64p_dbg_bkp_flags.M64P_BKP_FLAG_READ;
 					break;
 
 				case BreakType.Write:
-					breakpoint.flags |= (uint)m64p_dbg_bkp_flags.M64P_BPT_FLAG_WRITE;
+					breakpoint.flags |= (uint)m64p_dbg_bkp_flags.M64P_BKP_FLAG_WRITE;
 					break;
 
 				case BreakType.Execute:
-					breakpoint.flags |= (uint)m64p_dbg_bkp_flags.M64P_BPT_FLAG_EXEC;
+					breakpoint.flags |= (uint)m64p_dbg_bkp_flags.M64P_BKP_FLAG_EXEC;
 					break;
 			}
 
@@ -865,31 +972,32 @@ namespace BizHawk.Emulation.Cores.Nintendo.N64.NativeApi
 			switch(type)
 			{
 				case BreakType.Read:
-					index = m64pDebugBreakpointLookup(address.Value, 4, (uint)m64p_dbg_bkp_flags.M64P_BPT_FLAG_READ);
+					index = m64pDebugBreakpointLookup(address.Value, 4, (uint)m64p_dbg_bkp_flags.M64P_BKP_FLAG_READ);
 					break;
 
 				case BreakType.Write:
-					index = m64pDebugBreakpointLookup(address.Value, 4, (uint)m64p_dbg_bkp_flags.M64P_BPT_FLAG_WRITE);
+					index = m64pDebugBreakpointLookup(address.Value, 4, (uint)m64p_dbg_bkp_flags.M64P_BKP_FLAG_WRITE);
 					break;
 
 				case BreakType.Execute:
-					index = m64pDebugBreakpointLookup(address.Value, 4, (uint)m64p_dbg_bkp_flags.M64P_BPT_FLAG_EXEC);
+					index = m64pDebugBreakpointLookup(address.Value, 4, (uint)m64p_dbg_bkp_flags.M64P_BKP_FLAG_EXEC);
 					break;
 			}
 
 			m64p_breakpoint unused = new m64p_breakpoint();
-
 			m64pDebugBreakpointCommand(m64p_dbg_bkp_command.M64P_BKP_CMD_REMOVE_IDX, (uint)index, ref unused);
 		}
 
-		public void setTraceCallback(TraceCallback callback)
-		{
-			m64pSetTraceCallback(callback);
-		}
+		// TODO(jroweboy): Look deeper into what TraceCallback are used for
+		//public void setTraceCallback(TraceCallback callback)
+		//{
+		//	m64pSetTraceCallback(callback);
+		//}
 
 		public void getRegisters(byte[] dest)
 		{
-			m64pGetRegisters(dest);
+			//TODO(jroweboy): m64pDebugGetCPUDataPtr
+			//m64pGetRegisters(dest);
 		}
 
 		public void Step()
@@ -948,9 +1056,13 @@ namespace BizHawk.Emulation.Cores.Nintendo.N64.NativeApi
 
 			plugin.dllStartup = (PluginStartup)Marshal.GetDelegateForFunctionPointer(libLoader.GetProcAddr(plugin.dllHandle, "PluginStartup"), typeof(PluginStartup));
 			plugin.dllShutdown = (PluginShutdown)Marshal.GetDelegateForFunctionPointer(libLoader.GetProcAddr(plugin.dllHandle, "PluginShutdown"), typeof(PluginShutdown));
-			plugin.dllStartup(CoreDll, null, null);
+			m64p_error result = plugin.dllStartup(CoreDll, null, null);
+			if (result != m64p_error.M64ERR_SUCCESS)
+			{
+				throw new InvalidOperationException(string.Format("Error during attaching plugin {0}", PluginName));
+			}
 
-			m64p_error result = m64pCoreAttachPlugin(type, plugin.dllHandle);
+			result = m64pCoreAttachPlugin(type, plugin.dllHandle);
 			if (result != m64p_error.M64ERR_SUCCESS)
 			{
 				libLoader.FreePlatformSpecific(plugin.dllHandle);
@@ -973,6 +1085,7 @@ namespace BizHawk.Emulation.Cores.Nintendo.N64.NativeApi
 			}
 		}
 
+		//public event Action StateChanged;
 		public event Action FrameFinished;
 		public event Action VInterrupt;
 		public event Action BeforeRender;
@@ -980,32 +1093,73 @@ namespace BizHawk.Emulation.Cores.Nintendo.N64.NativeApi
 		public delegate void BreakpointHitCallback(uint address, BreakType type);
 		public event BreakpointHitCallback BreakpointHit;
 
+		private void FireStateChangedEvent(IntPtr Context, m64p_core_param param_type, int new_value)
+		{
+			switch (param_type)
+			{
+				case m64p_core_param.M64CORE_EMU_STATE:
+					if (new_value == (int)m64p_emu_state.M64EMU_PAUSED)
+					{
+						// TODO(jroweboy): Emu Paused
+					} else if (new_value == (int)m64p_emu_state.M64EMU_RUNNING)
+					{
+						m64pStartupComplete.Set();
+					} else if (new_value == (int)m64p_emu_state.M64EMU_STOPPED)
+					{
+						// TODO(jroweboy): Emu Stopped
+					} else
+					{
+						// Error 
+					}
+						break;
+				case m64p_core_param.M64CORE_VIDEO_MODE:
+					break;
+				case m64p_core_param.M64CORE_SAVESTATE_SLOT:
+					break;
+				case m64p_core_param.M64CORE_SPEED_FACTOR:
+					break;
+				case m64p_core_param.M64CORE_SPEED_LIMITER:
+					break;
+				case m64p_core_param.M64CORE_VIDEO_SIZE:
+					break;
+				case m64p_core_param.M64CORE_AUDIO_VOLUME:
+					break;
+				case m64p_core_param.M64CORE_AUDIO_MUTE:
+					break;
+				case m64p_core_param.M64CORE_INPUT_GAMESHARK:
+					break;
+				case m64p_core_param.M64CORE_STATE_LOADCOMPLETE:
+					break;
+				case m64p_core_param.M64CORE_STATE_SAVECOMPLETE:
+					break;
+			}
+		}
+
 		private void FireFrameFinishedEvent()
 		{
 			// Execute Frame Callback functions
 			if (FrameFinished != null)
 				FrameFinished();
-		}
-
-		private void FireVIEvent()
-		{
-			// Execute VI Callback functions
-			if (VInterrupt != null)
-				VInterrupt();
+			// TODO(jroweboy): After adding back in VI event support, remove this.
 			event_frameend = true; //order important
 			m64pEvent.Set(); //order important
 		}
 
-		private void FireRenderEvent()
+		//private void FireVIEvent()
+		//{
+		//	// Execute VI Callback functions
+		//	if (VInterrupt != null)
+		//		VInterrupt();
+		//	event_frameend = true; //order important
+		//	m64pEvent.Set(); //order important
+		//}
+
+		public void FireRenderEvent()
 		{
 			if (BeforeRender != null)
 				BeforeRender();
 		}
 
-		private bool CheckBreakpointFlag(ref m64p_breakpoint bkp, m64p_dbg_bkp_flags flag)
-		{
-			return ((bkp.flags & (uint)flag) != 0);
-		}
 
 		private void FireBreakpointEvent(int bpt)
 		{
@@ -1013,22 +1167,21 @@ namespace BizHawk.Emulation.Cores.Nintendo.N64.NativeApi
 			if((bpt == -1) || (BreakpointHit == null))
 				return;
 
-			m64p_breakpoint breakpoint = new m64p_breakpoint();
-
-			m64pDebugBreakpointCommand(m64p_dbg_bkp_command.M64P_BKP_CMD_GET_STRUCT, (uint)bpt, ref breakpoint);
+			uint flags = 0, accessed = 0;
+			m64pDebugBreakpointTriggeredBy(ref flags, ref accessed);
 
 			BreakType type = BreakType.Execute;
 
-			if(CheckBreakpointFlag(ref breakpoint, m64p_dbg_bkp_flags.M64P_BPT_FLAG_READ))
+			if ((flags & (uint)m64p_dbg_bkp_flags.M64P_BKP_FLAG_READ) != 0)
 			{
 				type = BreakType.Read;
 			}
-			else if(CheckBreakpointFlag(ref breakpoint, m64p_dbg_bkp_flags.M64P_BPT_FLAG_WRITE))
+			else if ((flags & (uint)m64p_dbg_bkp_flags.M64P_BKP_FLAG_WRITE) != 0)
 			{
 				type = BreakType.Write;
 			}
 
-			BreakpointHit(breakpoint.address, type);
+			BreakpointHit(accessed, type);
 		}
 
 		private void OnDebuggerInitialized()

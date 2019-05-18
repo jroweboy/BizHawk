@@ -48,11 +48,12 @@ namespace BizHawk.Emulation.Cores.Nintendo.N64
 			this.api = new mupen64plusAudioApi(core);
 
 			_samplingRate = api.GetSamplingRate();
-			Resampler = new SpeexResampler((SpeexResampler.Quality)6, SamplingRate, 44100,
-				SamplingRate, 44100);
+			Resampler = new SpeexResampler((SpeexResampler.Quality)6, SamplingRate, 44100, SamplingRate, 44100);
 
 			coreAPI = core;
-			coreAPI.VInterrupt += DoAudioFrame;
+			//TODO(jroweboy): Use VInterrupt instead of BufferSwap
+			coreAPI.BeforeRender += DoAudioFrame;
+			//coreAPI.VInterrupt += DoAudioFrame;
 		}
 
 		/// <summary>
@@ -79,8 +80,9 @@ namespace BizHawk.Emulation.Cores.Nintendo.N64
 
 		public void Dispose()
 		{
-			coreAPI.VInterrupt -= DoAudioFrame;
-			if(Resampler != null)
+			coreAPI.BeforeRender -= DoAudioFrame;
+			//coreAPI.VInterrupt -= DoAudioFrame;
+			if (Resampler != null)
 				Resampler.Dispose();
 			Resampler = null;
 			api = null;
